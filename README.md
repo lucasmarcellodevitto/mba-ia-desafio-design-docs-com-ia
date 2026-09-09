@@ -23,3 +23,20 @@ O resultado deverá contemplar os seguintes documentos:
 
 ---
 
+## Workflow adotado
+
+A ordem seguida foi a mesma sugerida pelo enunciado original:
+
+1 - Contextualização com IA: etapa para fornecer a IA acesso ao código (via Claude Code) e à transcrição. Exploração inicial para entender estrutura, padrões e o que a feature precisa endereçar.
+
+2 - ADRs: etapa para identificar e produzir as principais decisões antes dos demais documentos. Essas decisões vão formar o esqueleto do "como implementar".
+
+3 - RFC: consolidação da proposta técnica em cima das decisões. Referências aos ADR's escritos.
+
+4 - FDD: após decisões formalizadas e a proposta consolidada, temos a etapa do detalhamento de implementação com a seção obrigatória "Integração com o sistema existente".
+
+5 - PRD: por útimo temos o PRD. Documento mais alto nível, uma consolidação após a criação do RFC, FDD e ADRs.
+
+6 - Tracker: montado em paralelo com os outros documentos.
+
+7 - README: útima etapa. Feito quando o processo já estava completo.

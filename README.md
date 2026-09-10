@@ -40,3 +40,19 @@ A ordem seguida foi a mesma sugerida pelo enunciado original:
 6 - Tracker: montado em paralelo com os outros documentos.
 
 7 - README: útima etapa. Feito quando o processo já estava completo.
+
+
+```
+Leia o arquivo TRANSCRICAO.md do início ao fim e classifique cada tópico técnico discutido em uma das três categorias abaixo:
+
+DECISÃO FECHADA — o grupo chegou a um consenso explícito sobre o tópico. Cite o timestamp [hh:mm] e o nome da pessoa que confirmou ou fechou a decisão.
+
+DESCARTADA — a proposta ou alternativa foi levantada e posteriormente rejeitada de forma explícita. Informe o motivo do descarte e cite o timestamp [hh:mm] e o nome da pessoa que a descartou.
+
+ADIADA / EM ABERTO — o tópico foi levantado, mas não foi decidido, ou foi explicitamente adiado para uma fase futura. Cite o timestamp [hh:mm] correspondente.
+
+Não classifique um tópico como DECISÃO FECHADA por inferência. Essa classificação só deve ser utilizada quando houver uma frase ou manifestação explícita confirmando a decisão por parte de alguém do grupo.
+
+Se não houver um timestamp claro associado à discussão ou à decisão, não inclua o item no resultado.
+
+```

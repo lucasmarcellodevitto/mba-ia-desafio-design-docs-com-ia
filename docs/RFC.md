@@ -5,7 +5,7 @@
 | Campo | Valor |
 | --- | --- |
 | **Autor** | Larissa (Tech Lead) — responsável por abrir o doc de design da feature ([09:50]) |
-| **Status** | Em revisão |
+| **Status** | Revisado |
 | **Data** | 2026-09-09 |
 | **Origem** | Reunião técnica de quinta-feira, 09:00 (~55 min) — ver [TRANSCRICAO.md](../TRANSCRICAO.md) |
 | **Revisores** | Marcos (Product Manager), Bruno (Engenheiro Pleno — time de Pedidos), Diego (Engenheiro Sênior — time de Plataforma), Sofia (Engenheira de Segurança) |

@@ -81,7 +81,49 @@ Use a seguinte tabela como apoio de revião:
 
 ```
 
-## Iterações e ajustes
+mude ## Iterações e ajustes
+
+O conteúdo não saiu pronto na primeira interação. A IA é ótima para produzir um rascunho
+completo e bem-estruturado, mas erra de duas formas previsíveis: **inventa detalhe** quando
+o material de origem é omisso, e **repete tudo em todo documento** porque tenta deixar cada
+arquivo "autossuficiente". A maior parte do esforço foi corrigir esses dois vícios. Os
+momentos principais:
+
+- **FDD raso na parte de contratos.** A primeira versão documentava a fundo apenas um
+  endpoint (`POST /webhooks`) e resolvia os outros com uma tabela-resumo. Foi preciso
+  expandir para todos os endpoints com exemplos reais de request/response e códigos de
+  status, renumerar as subseções e consertar as referências cruzadas internas.
+
+- **FDD com regras que ninguém decidiu.** Ao descer para o detalhe, a IA criou requisitos
+  sem origem: um erro `WEBHOOK_ENDPOINT_INACTIVE`, tratamento por faixa de status code
+  (incluindo `410`), header `User-Agent`, *rollback* da transação de pedido por payload
+  grande, uma mecânica de rotação de *secret* que contradizia o próprio objetivo do
+  *grace period*, e um prefixo `whsec_` copiado de outro produto. Uma auditoria linha a
+  linha contra a transcrição removeu ou suavizou **9 pontos** inventados.
+
+- **Reescrita do contexto do FDD.** A IA aproveitou referências técnicas de um exemplo que
+  não correspondiam ao que o próprio documento descrevia; a seção foi refeita usando só o
+  que existe no código (`OrderService.changeStatus`, `canTransition`, etc.).
+
+- **Sobreposição entre documentos (avaliação de altitude).** Gerados de forma quase
+  independente, os quatro documentos ficaram "completos demais": o PRD trazia campos de
+  payload, nomes de header, o *schedule* exato de *backoff*, caminhos de arquivo com número
+  de linha e até a tabela de alternativas descartadas que é papel do RFC; o RFC repetia,
+  em "Impacto e riscos", a sua própria seção de "Questões em aberto" e o bloco de riscos do
+  PRD; o FDD reproduzia a lista de "fora de escopo" do PRD. Partindo do princípio de que
+  **conteúdo duplicado é sinal de item no lugar errado**, seções do PRD, do RFC e do FDD
+  foram reescritas para cada documento voltar à sua camada — produto, arquitetura, decisão
+  ou implementação.
+
+- **Tracker com números errados.** A primeira versão da tabela de verificação trazia
+  contagens estimadas "de cabeça" (ex.: *156 de 200 linhas*) que não batiam com o arquivo.
+  Um script conferiu as linhas e os números foram corrigidos para os reais (175 de 214
+  linhas com fonte na transcrição, 39 com fonte no código).
+
+No total, o material passou por **cerca de oito iterações principais**: contextualização,
+geração dos ADRs, do RFC, do FDD e do PRD, mais três passadas dedicadas de correção
+(completude do FDD, auditoria anti-invenção e revisão de altitude entre os documentos), além
+do fechamento do tracker e do README.
 
 ## Como navegar a entrega
 

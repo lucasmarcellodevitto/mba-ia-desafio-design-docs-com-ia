@@ -2,7 +2,7 @@
 
 | Campo | Valor |
 | --- | --- |
-| **Status** | Em revisão |
+| **Status** | Revisado |
 | **Data** | 2026-09-09 |
 | **Autor** | Larissa (Tech Lead) — abre o doc de design da feature ([09:50]) |
 | **Product Manager** | Marcos |

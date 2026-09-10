@@ -81,7 +81,7 @@ Use a seguinte tabela como apoio de revião:
 
 ```
 
-mude ## Iterações e ajustes
+## Iterações e ajustes
 
 O conteúdo não saiu pronto na primeira interação. A IA é ótima para produzir um rascunho
 completo e bem-estruturado, mas erra de duas formas previsíveis: **inventa detalhe** quando

@@ -77,7 +77,10 @@ Marcos). A solução reaproveita ao máximo os padrões da codebase ([09:30] Lar
 
 ## 3. Escopo e exclusões
 
-### No escopo
+O escopo de produto e a lista completa de exclusões estão no [PRD §5](PRD.md). Aqui, o
+recorte de **implementação**.
+
+### Artefatos a construir / alterar
 
 - Tabelas `webhook_endpoints`, `webhook_outbox`, `webhook_delivery_attempts`,
   `webhook_dead_letter` (§4).
@@ -88,20 +91,18 @@ Marcos). A solução reaproveita ao máximo os padrões da codebase ([09:30] Lar
 - Extensão de [`OrderService.changeStatus`](../src/modules/orders/order.service.ts) via
   `publishWebhookEvent(tx, …)` ([09:41] Bruno) — §12.
 - Endpoints HTTP do §6.
-- Filtro de status **na inserção** da outbox ([09:34] Bruno) — [ADR-007](adrs/ADR-007-formato-de-payload-headers-e-limites.md).
 
-### Fora do escopo (registrado na reunião)
+### Limites que afetam a implementação
 
-| Exclusão | Origem |
-| --- | --- |
-| Webhooks *inbound* (cliente → plataforma) | [09:02] Marcos |
-| Aviso por e-mail ao cliente quando o webhook falha | [09:37] Larissa — "próxima fase" |
-| *Rate limiting* de saída por cliente | [09:39] Larissa — "observar e decidir depois" |
-| Dashboard / painel visual | [09:40] Larissa — "projeto separado do time de frontend" |
-| Arquivamento das linhas entregues da outbox (retention ~30 dias) | [09:08] Diego |
-| Múltiplos workers em paralelo / ordering global | [09:13] Diego — "problema do futuro" |
-| Endurecer papéis no CRUD de configuração (hoje qualquer papel autenticado) | [09:37] Sofia |
-| Garantia *exactly-once* | [09:25] Diego |
+- **Single-worker apenas** — sem particionamento nem *lock* para múltiplos workers
+  ([09:13]); a ordenação garantida é só por `order_id`.
+- **Sem rotina de arquivamento** da outbox nesta entrega ([09:08]).
+- **Sem canal de *fallback*** (e-mail/alerta ao cliente) — a recuperação da DLQ é manual
+  ([09:37]).
+- **Sem *rate limiting*** de saída ([09:39]).
+- **CRUD de configuração** aberto a qualquer papel autenticado; só o *replay* exige ADMIN
+  ([09:37]).
+- **At-least-once**, não *exactly-once* ([09:25]).
 
 ---
 

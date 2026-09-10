@@ -21,10 +21,9 @@ B2B via webhooks HTTP. Quando o status de um pedido muda, um evento é gravado n
 separado** faz *polling* dessa tabela a cada 2 segundos e entrega os eventos por HTTP, com
 **retry em backoff exponencial** (5 tentativas) e **dead-letter queue** para falhas
 permanentes. As requisições são autenticadas com **HMAC-SHA256** e *secret* única por
-endpoint. A garantia de entrega é **at-least-once**, com `X-Event-Id` para deduplicação no
-cliente. A feature reaproveita ao máximo os padrões já existentes na codebase (módulos em
-`src/modules`, `AppError`, Pino, middleware de erro, validação Zod, `requireRole`).
-Estimativa: **três sprints**, com revisão de segurança incluída ao final.
+endpoint. A garantia de entrega é **at-least-once**, com deduplicação pelo cliente. A
+feature reaproveita ao máximo os padrões já existentes na codebase e não adiciona
+dependências. Estimativa: **três sprints**, com revisão de segurança incluída ao final.
 
 ---
 
@@ -60,36 +59,36 @@ Restrições técnicas relevantes:
 
 ### Visão geral
 
-1. **Padrão Outbox no MySQL.** Na mesma transação SQL que muda o status do pedido,
-   gravamos o evento (já renderizado — *snapshot*) numa tabela `webhook_outbox`. Se a
-   transação principal sofre *rollback*, o evento desaparece junto; se comita, o evento
-   está garantidamente registrado ([09:06]–[09:08] Diego; [09:52] snapshot).
+1. **Padrão Outbox no MySQL.** Na mesma transação que muda o status do pedido, gravamos o
+   evento (um *snapshot* do estado) numa tabela de *outbox*. Se a transação sofre
+   *rollback*, o evento não existe; se comita, está garantidamente registrado
+   ([09:06]–[09:08] Diego; [09:52] snapshot) — [ADR-001](adrs/ADR-001-outbox-no-mysql.md).
 
-2. **Worker em processo separado.** Uma nova *entry-point* (`src/worker.ts` + `npm run
-   worker`), no mesmo banco e mesma stack, mas fora do processo da API. Faz *polling* dos
-   eventos pendentes a cada **2 segundos** e dispara as chamadas HTTP. A latência mínima de
-   2 segundos no pior caso é aceita ([09:10]–[09:11]). Enquanto for *single-worker*, os
-   eventos são processados em ordem de criação, garantindo ordenação **por `order_id`**
-   (não global) ([09:12]–[09:13]).
+2. **Worker em processo separado.** Um processo próprio, no mesmo banco e mesma stack, mas
+   fora da API, faz *polling* da *outbox* e dispara as chamadas HTTP. Aceitamos a latência
+   de base do ciclo de *polling*, dentro do SLA de 10 s ([09:10]–[09:11]). Enquanto for
+   *single-worker*, a ordenação é garantida **por pedido** (não global) ([09:12]–[09:13]) —
+   [ADR-002](adrs/ADR-002-worker-em-processo-separado-com-polling.md).
 
-3. **Retry e DLQ.** Falha de entrega dispara *retry* com **backoff exponencial**
-   (1m / 5m / 30m / 2h / 12h), até **5 tentativas**; depois disso, o evento vai para uma
-   tabela `webhook_dead_letter`. Há um endpoint administrativo de *replay* manual,
-   restrito a `ADMIN` e auditado ([09:15]–[09:19], [09:36]). *Timeout* HTTP de 10 segundos
-   ([09:42]).
+3. **Retry e DLQ.** Falha de entrega dispara *retry* com *backoff*; após esgotar as
+   tentativas, o evento vai para uma *dead-letter queue*, reprocessável manualmente por um
+   endpoint restrito a `ADMIN` e auditado ([09:15]–[09:19], [09:36]) —
+   [ADR-003](adrs/ADR-003-retry-com-backoff-e-dead-letter-queue.md).
 
-4. **Segurança.** Assinatura **HMAC-SHA256** sobre o corpo do request (`X-Signature`),
-   **secret única por endpoint** (não global), com **rotação** via API e *grace period* de
-   24h para a secret antiga. URL do webhook obrigatoriamente `https` ([09:20]–[09:23]).
+4. **Segurança.** Cada entrega é assinada (HMAC) com uma *secret* **única por endpoint**,
+   rotacionável via API com janela de sobreposição; a URL do webhook é obrigatoriamente
+   `https` ([09:20]–[09:23]) —
+   [ADR-004](adrs/ADR-004-autenticacao-hmac-sha256-com-secret-por-endpoint.md).
 
-5. **Garantia de entrega at-least-once.** O cliente pode receber o mesmo evento mais de
-   uma vez e deduplica pelo `X-Event-Id` (UUID gerado na inserção do evento). Não
-   perseguimos *exactly-once* — é o padrão de mercado (Stripe, GitHub) ([09:24]–[09:26]).
+5. **Entrega at-least-once.** O cliente pode receber o mesmo evento mais de uma vez e
+   deduplica por um identificador único de evento. Não perseguimos *exactly-once* — é o
+   padrão de mercado (Stripe, GitHub) ([09:24]–[09:26]) —
+   [ADR-005](adrs/ADR-005-entrega-at-least-once-com-x-event-id.md).
 
-6. **Reuso dos padrões do projeto.** Webhook entra como um módulo em
-   `src/modules/webhooks`, com erros estendendo `AppError` e códigos prefixados por
-   `WEBHOOK_`, logger Pino existente, middleware de erro atual, validação Zod e
-   `requireRole` já disponíveis. Nenhuma dependência nova ([09:27]–[09:30]).
+6. **Reuso dos padrões do projeto.** Webhook entra como mais um módulo, reaproveitando a
+   estrutura, o tratamento de erros, o logger, a validação e a autorização já existentes.
+   Nenhuma dependência nova ([09:27]–[09:30]) —
+   [ADR-006](adrs/ADR-006-reuso-dos-padroes-existentes-do-projeto.md).
 
 ### Superfície funcional (resumo)
 
@@ -146,34 +145,34 @@ dias úteis para revisão de HMAC e geração de *secret* antes do deploy) ([09:
 
 ## Impacto e riscos
 
-**Impacto**
+_Gestão de risco de entrega, prazo e impacto no negócio: ver [PRD §10](PRD.md). Aqui,
+apenas o impacto no sistema e os riscos inerentes a **esta abordagem**, para orientar a
+revisão._
 
-- **Alteração no caminho crítico de pedidos:** `OrderService.changeStatus` passará a
-  gravar o evento na outbox dentro da transação existente. Se a inserção falhar, a mudança
-  de status inteira sofre *rollback* ([09:40]–[09:41]). É o ponto de integração mais
-  sensível.
-- **Novo processo operacional:** o worker (`npm run worker`) precisa ser implantado,
-  monitorado e reiniciado de forma independente da API.
-- **Novas tabelas** (`webhook_outbox`, `webhook_dead_letter`, configuração de webhook,
-  histórico de entregas) e **novo módulo** `src/modules/webhooks`.
-- **Contrato público** de payload e headers, a ser documentado por Marcos no portal do
-  desenvolvedor ([09:40]).
+**Impacto no sistema**
 
-**Riscos**
+- **Ponto de integração sensível:** `OrderService.changeStatus` passa a gravar o evento na
+  transação existente; se a inserção falhar, a mudança de status sofre *rollback*
+  ([09:40]–[09:41]).
+- **Novo processo operacional:** um worker que precisa ser implantado e monitorado
+  independentemente da API.
+- **Novas tabelas** e **novo módulo** `src/modules/webhooks`.
+- **Novo contrato público** (payload e headers), a ser versionado e documentado no portal
+  do desenvolvedor ([09:40]).
 
-- **Latência acumulada:** até ~2s de *polling* + tempo da chamada HTTP; em cenário de
-  *retry*, um evento pode levar até ~15h para ser considerado falha permanente
-  ([09:17]). Aceito pelo grupo, mas é um risco de percepção para o cliente.
-- **Single-worker como gargalo e ponto único** de processamento; escala e ordenação
-  global ficam limitadas até o trabalho adiado de particionamento.
-- **Gestão de *secret*:** a secret precisa ser recuperável para recalcular o HMAC no
-  envio, ampliando a superfície de proteção de dado em repouso. Mitigação: revisão de
-  segurança dedicada da Sofia antes do deploy ([09:46]).
-- **Deduplicação delegada ao cliente:** um cliente que não implemente a checagem de
-  `X-Event-Id` pode processar o mesmo pedido duas vezes ([09:25] Sofia).
-- **Crescimento da outbox** sem rotina de arquivamento definida nesta fase ([09:08]).
-- **Prazo apertado** (fim de novembro / três sprints) com dependência da janela de
-  revisão de segurança no fim ([09:45]–[09:47]).
+**Riscos da abordagem**
+
+- **Latência inerente ao *polling* + entrega tardia em *retry*:** um evento em *retry*
+  pode levar até ~15h para ser considerado falha permanente ([09:17]). Aceito pelo grupo.
+- **Gestão da *secret*:** precisa ser recuperável para recalcular o HMAC no envio,
+  ampliando a superfície de proteção de dado em repouso — consequências em
+  [ADR-004](adrs/ADR-004-autenticacao-hmac-sha256-com-secret-por-endpoint.md); revisão de
+  segurança dedicada antes do deploy ([09:46]).
+- **Deduplicação depende do cliente** ([09:25]) —
+  [ADR-005](adrs/ADR-005-entrega-at-least-once-com-x-event-id.md).
+
+Limitações conhecidas — *single-worker* como gargalo/ponto único e crescimento da outbox
+sem rotina de arquivamento — estão registradas em **Questões em aberto** acima.
 
 ---
 

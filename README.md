@@ -42,6 +42,10 @@ A ordem seguida foi a mesma sugerida pelo enunciado original:
 7 - README: útima etapa. Feito quando o processo já estava completo.
 
 
+## Prompts customizados
+
+#### Prompt de contextualização
+
 ```
 Leia o arquivo TRANSCRICAO.md do início ao fim e classifique cada tópico técnico discutido em uma das três categorias abaixo:
 
@@ -56,3 +60,48 @@ Não classifique um tópico como DECISÃO FECHADA por inferência. Essa classifi
 Se não houver um timestamp claro associado à discussão ou à decisão, não inclua o item no resultado.
 
 ```
+
+#### Prompt para validar os papéis e a coerência do conteúdo dos arquivos gerados
+
+```
+Revise os documentos ADR's, FDD, PRC, RFC e certifique que foram criados respeitando o papel de cada um.
+
+Os documentos não se repetem, cada um opera em uma altura diferente. Verifique a fronteira entre eles: conteúdo duplicado entre documentos é um sinal de que algo esta no lugar errado.
+
+Em uma frase: o RFC propõe e abre para revisão, os ADRs registram cada decisão fechada e o FDD detalha como construir. O RFC é conciso e fala em decisão; o FDD é profundo e fala em implementação. Não repita no RFC o nível de detalhe do FDD.
+
+Use a seguinte tabela como apoio de revião:
+
+| Documento | Papel | Camada | Pergunta que responde |
+|---|---|---|---|
+| **PRD** | Define o problema, o público, o escopo e as métricas de sucesso | Produto / Negócio | **Por que e o quê?** |
+| **RFC** | Apresenta a proposta técnica para revisão, incluindo a abordagem geral, as alternativas consideradas e as questões em aberto | Arquitetura | **Como pretendemos resolver e o que ainda está em aberto?** |
+| **ADRs** | Registra cada decisão arquitetural isolada, incluindo seu contexto e suas consequências | Decisão pontual | **Por que decidimos exatamente assim?** |
+| **FDD** | Detalha a especificação de implementação, incluindo fluxos, contratos, tratamento de erros e integração com o código | Implementação | **Como construir, em detalhe?** |
+
+```
+
+## Iterações e ajustes
+
+## Como navegar a entrega
+
+Leia na ordem abaixo — ela vai do "por quê" até o detalhe de código, e cada documento
+assume que você já viu o anterior:
+
+1. **[docs/PRD.md](docs/PRD.md)** — o ponto de partida: qual dor de cliente originou a
+   feature, quem são os afetados e como vamos saber que deu certo (objetivos e métricas).
+2. **[docs/RFC.md](docs/RFC.md)** — a proposta de arquitetura submetida a revisão: o
+   desenho geral da solução, o que foi avaliado e deixado de fora, e os pontos que
+   seguem sem resposta.
+3. **[docs/adrs/](docs/adrs/)** — o registro decisão a decisão. São 7 ADRs (ADR-001 a
+   ADR-007) que sustentam o RFC; cada arquivo isola uma escolha e traz seu contexto, a
+   decisão em si, o que foi descartado e o que ela custa.
+4. **[docs/FDD.md](docs/FDD.md)** — o nível de "mãos no código": modelagem das tabelas,
+   fluxos passo a passo, contratos HTTP, a matriz de erros `WEBHOOK_*` e a seção
+   *Integração com o sistema existente*, que aponta onde tocar na base atual.
+5. **[docs/TRACKER.md](docs/TRACKER.md)** — a referência cruzada. Se quiser conferir de
+   onde saiu uma afirmação específica dos quatro documentos, aqui cada item está ligado
+   à sua origem (um trecho da transcrição ou um arquivo do código).
+6. **[TRANSCRICAO.md](TRANSCRICAO.md)** — a fonte primária. Útil para ler uma citação no
+   contexto completo da conversa que a gerou.
+

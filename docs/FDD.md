@@ -79,7 +79,7 @@ Marcos). A solução reaproveita ao máximo os padrões da codebase ([09:30] Lar
 
 ### No escopo
 
-- Tabelas `webhook_endpoint`, `webhook_outbox`, `webhook_delivery_attempt`,
+- Tabelas `webhook_endpoints`, `webhook_outbox`, `webhook_delivery_attempts`,
   `webhook_dead_letter` (§4).
 - Módulo `src/modules/webhooks` (controller / service / repository / routes / schemas /
   errors / worker) — [ADR-006](adrs/ADR-006-reuso-dos-padroes-existentes-do-projeto.md).
@@ -134,8 +134,7 @@ model WebhookEndpoint {
 
   customer Customer @relation(fields: [customerId], references: [id])
 
-  @@index([customerId])
-  @@index([active])
+  @@index([customerId, active])
   @@map("webhook_endpoints")
 }
 
@@ -144,6 +143,7 @@ model WebhookOutbox {
   endpointId     String              @db.Char(36)
   eventType      String              @db.VarChar(64)                     // "order.status_changed"
   orderId        String              @db.Char(36)
+  requestId      String?             @db.Char(36)                        // X-Request-Id de origem, p/ correlação (§9.3)
   payload        Json                                                    // snapshot renderizado (ADR-007)
   status         WebhookOutboxStatus @default(PENDING)
   attempts       Int                 @default(0)
@@ -155,7 +155,7 @@ model WebhookOutbox {
 
   endpoint WebhookEndpoint @relation(fields: [endpointId], references: [id])
 
-  @@index([status, nextAttemptAt])   // varredura do worker (ADR-001 §performance)
+  @@index([status, nextAttemptAt])   // varredura do worker ([09:08] Diego)
   @@index([orderId])                 // ordering implícita por order (ADR-002)
   @@index([createdAt])
   @@map("webhook_outbox")
@@ -219,9 +219,8 @@ Adicionar `webhookEndpoints WebhookEndpoint[]` ao `model Customer`
 Origem: [09:06] Diego, [09:34] Bruno, [09:41] Bruno/Diego, [09:52] snapshot —
 [ADR-001](adrs/ADR-001-outbox-no-mysql.md), [ADR-007](adrs/ADR-007-formato-de-payload-headers-e-limites.md).
 
-1. Em [`OrderService.changeStatus`](../src/modules/orders/order.service.ts), após
-   `tx.order.update(...)` e `tx.orderStatusHistory.create(...)` (linhas 158‑167) e antes do
-   `return`, chamar:
+1. Em [`OrderService.changeStatus`](../src/modules/orders/order.service.ts), após obter
+   `refreshed` (linha 169) e antes do `return refreshed!`, chamar a função livre:
    ```ts
    await publishWebhookEvent(tx, { order: refreshed!, fromStatus: from, toStatus: to });
    ```
@@ -229,12 +228,9 @@ Origem: [09:06] Diego, [09:34] Bruno, [09:41] Bruno/Diego, [09:52] snapshot —
    a. `endpoints = await tx.webhookEndpoint.findMany({ where: { customerId, active: true } })`.
    b. Filtra os endpoints cujo `subscribedStatuses` contém `toStatus`. **Se nenhum, retorna
       sem inserir nada** ([09:34] Bruno — "economiza linha na tabela").
-   c. Para cada endpoint, renderiza o `payload` (snapshot, §6.4) e insere uma linha em
+   c. Para cada endpoint, renderiza o `payload` (snapshot, §6.10) e insere uma linha em
       `webhook_outbox` com `status = PENDING`, `attempts = 0`, `nextAttemptAt = now()`,
       `id` = UUID (será o `X-Event-Id`).
-   d. Se a validação de tamanho (`WEBHOOK_MAX_PAYLOAD_BYTES`) falhar aqui, lançar
-      `WebhookPayloadTooLargeError` → a transação inteira sofre *rollback* (o payload
-      nunca deveria chegar a 64 KB — [09:24]).
 3. `publishWebhookEvent` **recebe o `tx`** (`Prisma.TransactionClient`) e **não** injeta um
    repository no `OrderService` ([09:41] Diego — "função pura recebendo o tx").
 4. Se qualquer `INSERT` falhar, a exceção propaga e o `$transaction` reverte tudo —
@@ -283,17 +279,20 @@ Origem: [09:20] Sofia (HMAC), [09:42] Diego (timeout), [09:44] Diego (headers) �
 
 1. `body = JSON.stringify(outbox.payload)`.
 2. `sentAt = new Date().toISOString()`.
-3. `signature = "sha256=" + hmacSha256Hex(endpoint.secretCurrent, body)` (módulo `crypto`).
-4. `POST endpoint.url` com headers do §6.3 e `AbortController` armado em
+3. **Salvaguarda de tamanho:** se `body` exceder `WEBHOOK_MAX_PAYLOAD_BYTES` (64 KB),
+   **não envia**: falha com `WEBHOOK_PAYLOAD_TOO_LARGE` e o evento vai direto para a DLQ,
+   sem novas tentativas ([09:23]‑[09:24] Sofia/Larissa). O payload é montado a partir dos
+   campos fixos do §6.10, então na prática isso não ocorre.
+4. `signature = "sha256=" + hmacSha256Hex(endpoint.secretCurrent, body)` (módulo `crypto`).
+5. `POST endpoint.url` com headers do §6.9 e `AbortController` armado em
    `WEBHOOK_HTTP_TIMEOUT_MS` (`fetch` nativo).
-5. Sucesso = status **200‑299**. Qualquer outro status, *timeout*, DNS ou erro de conexão
-   = falha; registrar `responseStatus` (ou `null`) e `error`.
-6. Ler no máximo os primeiros 2048 bytes da resposta para `responseBodySnippet`
-   (diagnóstico).
+6. Sucesso = status **200‑299**. Qualquer outra resposta, *timeout*, DNS ou erro de
+   conexão = falha; registrar `responseStatus` (ou `null`) e `error`.
+7. Guardar um trecho da resposta (limitado, ex.: 2 KB) em `responseBodySnippet` para
+   diagnóstico.
 
-`backoff(attempts)` = `WEBHOOK_BACKOFF_SCHEDULE_MIN[attempts - 1]` minutos; para
-`attempts` além do array, usa o último valor. Sem *jitter* nesta fase (single-worker,
-[09:12]).
+`backoff(attempts)` = `WEBHOOK_BACKOFF_SCHEDULE_MIN[attempts - 1]` minutos. A progressão é
+fixa (`1/5/30/120/720`), sem randomização — exatamente os valores definidos em [09:17].
 
 ### 5.4 Retry e DLQ
 
@@ -317,7 +316,7 @@ escopo ([09:37] Larissa).
 
 Origem: [09:18] Diego, [09:36] Sofia/Larissa — [ADR-003](adrs/ADR-003-retry-com-backoff-e-dead-letter-queue.md).
 
-`POST /api/v1/admin/webhooks/dead-letter/:id/replay` (role **ADMIN**, §6.8):
+`POST /api/v1/admin/webhooks/dead-letter/:id/replay` (role **ADMIN**, §6.14):
 1. Carrega `webhook_dead_letter` por `id`; 404 `WEBHOOK_DEAD_LETTER_NOT_FOUND` se ausente.
 2. Se `replayedAt != null` → 409 `WEBHOOK_ALREADY_REPLAYED`.
 3. Transação: `UPDATE webhook_outbox SET status='PENDING', attempts=0, nextAttemptAt=NOW(),
@@ -332,14 +331,16 @@ Origem: [09:18] Diego, [09:36] Sofia/Larissa — [ADR-003](adrs/ADR-003-retry-co
 Origem: [09:21] Sofia — [ADR-004](adrs/ADR-004-autenticacao-hmac-sha256-com-secret-por-endpoint.md).
 
 `POST /api/v1/webhooks/:id/rotate-secret`:
-1. `secretPrevious = secretCurrent`; `secretCurrent = generateSecret()` (32 bytes
-   aleatórios de `crypto`, base64url); `secretRotatesAt = NOW() + WEBHOOK_SECRET_GRACE_PERIOD_HOURS`.
+1. `secretPrevious = secretCurrent`; `secretCurrent = generateSecret()` (bytes aleatórios
+   via `crypto`; parâmetros finais na revisão de segurança — [09:46] Sofia);
+   `secretRotatesAt = NOW() + WEBHOOK_SECRET_GRACE_PERIOD_HOURS`.
 2. Retorna a **nova** secret em texto puro (única oportunidade — igual à criação, [09:31]).
-3. Durante o *grace period*, o **envio** assina só com `secretCurrent`; o cliente valida
-   contra a nova. A `secretPrevious` existe para o cliente que ainda não migrou conseguir
-   validar envios que estavam em retry — na prática o worker sempre assina com a corrente,
-   então documentar no portal que o cliente deve aceitar **ambas** durante 24 h
-   ([09:21] Sofia — "a antiga fica válida por 24 horas em paralelo").
+3. Requisito ([09:21] Sofia — "a antiga fica válida por 24 horas em paralelo"): durante as
+   24 h seguintes à rotação, uma entrega deve poder ser validada pelo cliente **com a
+   secret nova ou com a anterior**, para ele migrar sem downtime. A estratégia exata de
+   assinatura na janela de sobreposição (assinar com a anterior até `secretRotatesAt` e
+   então trocar, ou enviar duas assinaturas) fica para a revisão de segurança
+   ([09:46] Sofia). `secretPrevious` guarda a secret anterior até o fim da janela.
 4. Job de limpeza (no próprio loop do worker): `secretPrevious = NULL` quando
    `secretRotatesAt < NOW()`.
 
@@ -374,7 +375,7 @@ Response `201`:
   "url": "https://hooks.atlascomercial.com/orders",
   "subscribedStatuses": ["SHIPPED", "DELIVERED"],
   "active": true,
-  "secret": "whsec_9Q3f...redacted-only-shown-here",
+  "secret": "<secret gerada — exibida apenas nesta resposta>",
   "createdAt": "2026-09-09T12:00:00.000Z"
 }
 ```
@@ -384,19 +385,149 @@ Sofia). `subscribedStatuses` ⊆ enum `OrderStatus`
 ([prisma/schema.prisma](../prisma/schema.prisma) linhas 16‑23); vazio → `400
 WEBHOOK_INVALID_EVENT_FILTER`. `customerId` inexistente → `404 WEBHOOK_CUSTOMER_NOT_FOUND`.
 
-### 6.2 Demais rotas de configuração
+### 6.2 `GET /api/v1/webhooks` — listar endpoints de um customer
 
-| Método & rota | Sucesso | Semântica |
-| --- | --- | --- |
-| `GET /api/v1/webhooks?customerId=&page=&pageSize=` | `200` lista paginada (formato de [src/shared/http/response.ts](../src/shared/http/response.ts): `{ data, pagination }`) | Lista endpoints de um customer ([09:33] Bruno). `secret` **nunca** retorna. |
-| `GET /api/v1/webhooks/:id` | `200` objeto (sem `secret`) | `404 WEBHOOK_NOT_FOUND` |
-| `PATCH /api/v1/webhooks/:id` | `200` objeto | Edita `url`, `subscribedStatuses`, `active` ([09:33] Bruno). Não edita `secret` (usar §6.6). |
-| `DELETE /api/v1/webhooks/:id` | `204` | Remove o endpoint ([09:33] Bruno). |
-| `POST /api/v1/webhooks/:id/rotate-secret` | `200 { "secret": "whsec_new..." }` | §5.6 ([09:21] Sofia) |
-| `GET /api/v1/webhooks/:id/deliveries?page=&pageSize=` | `200` lista paginada | Últimas ~100 tentativas: `attemptNumber`, `responseStatus`, `durationMs`, `error`, `createdAt`, trecho da resposta ([09:34] Marcos) |
-| `POST /api/v1/admin/webhooks/dead-letter/:id/replay` | `202` | Role **ADMIN** (§6.8), §5.5 |
+Query: `customerId` (obrigatório), `page` (default `1`), `pageSize` (default `20`, máx
+`100`). Lista endpoints de um customer ([09:33] Bruno). Formato de
+[src/shared/http/response.ts](../src/shared/http/response.ts). **`secret` nunca retorna.**
 
-### 6.3 Headers do request enviado ao cliente
+Response `200`:
+```json
+{
+  "data": [
+    {
+      "id": "b4a1c9e0-1111-2222-3333-444455556666",
+      "customerId": "0e6f1c2a-...-b1",
+      "url": "https://hooks.atlascomercial.com/orders",
+      "subscribedStatuses": ["SHIPPED", "DELIVERED"],
+      "active": true,
+      "createdAt": "2026-09-09T12:00:00.000Z",
+      "updatedAt": "2026-09-09T12:00:00.000Z"
+    }
+  ],
+  "pagination": { "page": 1, "pageSize": 20, "total": 1, "totalPages": 1 }
+}
+```
+Status: `200` sempre (lista vazia se não houver endpoints); `400 VALIDATION_ERROR` se
+`customerId` ausente (via `validate`).
+
+### 6.3 `GET /api/v1/webhooks/:id` — detalhe de um endpoint
+
+Response `200`:
+```json
+{
+  "id": "b4a1c9e0-1111-2222-3333-444455556666",
+  "customerId": "0e6f1c2a-...-b1",
+  "url": "https://hooks.atlascomercial.com/orders",
+  "subscribedStatuses": ["SHIPPED", "DELIVERED"],
+  "active": true,
+  "secretRotatesAt": null,
+  "createdAt": "2026-09-09T12:00:00.000Z",
+  "updatedAt": "2026-09-09T12:00:00.000Z"
+}
+```
+Status: `200`; `404` se não existe:
+```json
+{ "error": { "code": "WEBHOOK_NOT_FOUND", "message": "Webhook endpoint not found" } }
+```
+
+### 6.4 `PATCH /api/v1/webhooks/:id` — editar endpoint
+
+Edita `url`, `subscribedStatuses` e/ou `active` ([09:33] Bruno). **Não** edita `secret`
+(usar §6.6). Todos os campos são opcionais; ao menos um deve vir.
+
+Request:
+```json
+{
+  "subscribedStatuses": ["PAID", "SHIPPED", "DELIVERED"],
+  "active": false
+}
+```
+Response `200` (objeto completo, mesmo shape do §6.3, já atualizado).
+Status: `200`; `400 WEBHOOK_INVALID_URL` se `url` não for `https` ([09:23] Sofia);
+`400 WEBHOOK_INVALID_EVENT_FILTER` se `subscribedStatuses` inválido; `404 WEBHOOK_NOT_FOUND`.
+
+### 6.5 `DELETE /api/v1/webhooks/:id` — remover endpoint
+
+Sem corpo de request. Response `204` **sem corpo** ([09:33] Bruno). `404 WEBHOOK_NOT_FOUND`
+se não existe.
+
+### 6.6 `POST /api/v1/webhooks/:id/rotate-secret` — rotacionar secret
+
+Sem corpo de request. Fluxo em §5.6 ([09:21] Sofia).
+
+Response `200`:
+```json
+{
+  "id": "b4a1c9e0-1111-2222-3333-444455556666",
+  "secret": "<nova secret — exibida apenas nesta resposta>",
+  "secretRotatesAt": "2026-09-10T12:00:00.000Z"
+}
+```
+Status: `200`; `404 WEBHOOK_NOT_FOUND`.
+A `secret` retorna **apenas nesta resposta** (igual à criação).
+
+### 6.7 `GET /api/v1/webhooks/:id/deliveries` — histórico de entregas
+
+Query: `page`, `pageSize`. Últimas tentativas do endpoint, mais recentes primeiro
+([09:34] Marcos).
+
+Response `200`:
+```json
+{
+  "data": [
+    {
+      "id": "d1e2f3a4-...-01",
+      "outboxId": "6f9619ff-8b86-d011-b42d-00cf4fc964ff",
+      "attemptNumber": 1,
+      "requestUrl": "https://hooks.atlascomercial.com/orders",
+      "responseStatus": 200,
+      "responseBodySnippet": "{\"received\":true}",
+      "durationMs": 143,
+      "error": null,
+      "createdAt": "2026-09-09T12:00:02.100Z"
+    },
+    {
+      "id": "d1e2f3a4-...-00",
+      "outboxId": "1c0b...-ff",
+      "attemptNumber": 3,
+      "requestUrl": "https://hooks.atlascomercial.com/orders",
+      "responseStatus": null,
+      "responseBodySnippet": null,
+      "durationMs": 10000,
+      "error": "timeout after 10000ms",
+      "createdAt": "2026-09-09T11:20:00.000Z"
+    }
+  ],
+  "pagination": { "page": 1, "pageSize": 20, "total": 2, "totalPages": 1 }
+}
+```
+Status: `200`; `404 WEBHOOK_NOT_FOUND` se o endpoint não existe.
+
+### 6.8 `POST /api/v1/admin/webhooks/dead-letter/:id/replay` — reprocessar item da DLQ
+
+Role **ADMIN** obrigatória (§6.14). Sem corpo de request. Fluxo em §5.5.
+
+Response `202`:
+```json
+{
+  "deadLetterId": "aa11bb22-...-cc",
+  "outboxId": "6f9619ff-8b86-d011-b42d-00cf4fc964ff",
+  "status": "PENDING",
+  "replayedAt": "2026-09-10T09:00:00.000Z"
+}
+```
+Status: `202` (reenfileirado); `403 FORBIDDEN` se o papel não for ADMIN
+([09:36] Sofia):
+```json
+{ "error": { "code": "FORBIDDEN", "message": "Insufficient permissions" } }
+```
+`404 WEBHOOK_DEAD_LETTER_NOT_FOUND`; `409 WEBHOOK_ALREADY_REPLAYED` se já reprocessado:
+```json
+{ "error": { "code": "WEBHOOK_ALREADY_REPLAYED", "message": "Dead-letter entry already replayed" } }
+```
+
+### 6.9 Headers do request enviado ao cliente
 
 Origem: [09:44]‑[09:45] Diego/Sofia — [ADR-007](adrs/ADR-007-formato-de-payload-headers-e-limites.md).
 
@@ -407,9 +538,8 @@ Origem: [09:44]‑[09:45] Diego/Sofia — [ADR-007](adrs/ADR-007-formato-de-payl
 | `X-Webhook-Id` | `webhook_endpoints.id` — para o cliente com vários endpoints ([09:44] Sofia) |
 | `X-Timestamp` | ISO 8601 do envio — permite ao cliente detectar *replay attack* ([09:44] Diego) |
 | `X-Signature` | `sha256=<hmac_hex>` — HMAC-SHA256 de `secretCurrent` sobre o corpo bruto ([09:20] Sofia) |
-| `User-Agent` | `order-management-api/webhooks` |
 
-### 6.4 Payload do evento (exemplo)
+### 6.10 Payload do evento (exemplo)
 
 Origem: [09:43] Diego — [ADR-007](adrs/ADR-007-formato-de-payload-headers-e-limites.md).
 **Snapshot** no momento da transição ([09:52]). Sem `items` — o cliente busca detalhes em
@@ -429,17 +559,14 @@ Origem: [09:43] Diego — [ADR-007](adrs/ADR-007-formato-de-payload-headers-e-li
 }
 ```
 
-### 6.5 Códigos de status esperados do **cliente**
+### 6.11 Interpretação da resposta do **cliente**
 
-| Faixa | Interpretação do worker |
-| --- | --- |
-| `200‑299` | Entregue. `DELIVERED`. |
-| `3xx` | Não seguimos redirect → falha, retry. |
-| `4xx` (exceto 408/429) | Falha; retry mesmo assim (cliente pode corrigir). Sem tratamento especial de `410` nesta fase. |
-| `408`, `429`, `5xx` | Falha transitória → retry. |
-| timeout / rede | Falha → retry. |
+Regra única ([09:15] Diego; [09:42] Diego): **`200‑299` = entregue** (`DELIVERED`).
+**Qualquer outra resposta, *timeout* (10 s) ou erro de rede = falha**, e o evento entra no
+ciclo de retry (§5.4). Não há, nesta fase, tratamento diferenciado por código de status
+(ex.: parar de tentar em `4xx`) — possível melhoria futura.
 
-### 6.6 Verificação da assinatura (documentação para o cliente — portal do dev, [09:26] Marcos)
+### 6.12 Verificação da assinatura (documentação para o cliente — portal do dev, [09:26] Marcos)
 
 ```
 esperado = "sha256=" + HMAC_SHA256(secret, corpo_bruto_do_request)  // hex
@@ -447,13 +574,13 @@ comparar em tempo constante com o header X-Signature
 durante 24h após rotação, aceitar assinatura com a secret nova OU a anterior
 ```
 
-### 6.7 Idempotência (cliente)
+### 6.13 Idempotência (cliente)
 
 `X-Event-Id` é estável por evento e reenviado em todas as tentativas ([09:25] Diego). O
 cliente deve persistir os `event_id` já processados e ignorar repetidos —
 [ADR-005](adrs/ADR-005-entrega-at-least-once-com-x-event-id.md).
 
-### 6.8 Autorização
+### 6.14 Autorização
 
 - CRUD de configuração, `deliveries`, `rotate-secret`: **qualquer papel autenticado** por
   enquanto ([09:37] Sofia).
@@ -482,10 +609,8 @@ já serializa `AppError` sem alteração ([09:29] Bruno).
 | `WEBHOOK_INVALID_URL` | 400 | `url` não é `https` ou é malformada ([09:23] Sofia) | `extends ValidationError` |
 | `WEBHOOK_INVALID_EVENT_FILTER` | 400 | `subscribedStatuses` vazio ou com valor fora de `OrderStatus` | `extends ValidationError` |
 | `WEBHOOK_SECRET_REQUIRED` | 400 | operação que exige secret sem que exista (estado inconsistente) ([09:29] Bruno) | `extends ValidationError` |
-| `WEBHOOK_DELIVERY_NOT_FOUND` | 404 | `:id` de delivery inexistente | `extends NotFoundError` |
-| `WEBHOOK_DEAD_LETTER_NOT_FOUND` | 404 | replay de DLQ inexistente | `extends NotFoundError` |
+| `WEBHOOK_DEAD_LETTER_NOT_FOUND` | 404 | replay de item de DLQ inexistente | `extends NotFoundError` |
 | `WEBHOOK_ALREADY_REPLAYED` | 409 | replay de item de DLQ já reprocessado | `extends ConflictError` |
-| `WEBHOOK_ENDPOINT_INACTIVE` | 409 | rotate-secret / replay sobre endpoint `active=false` | `extends ConflictError` |
 
 Erros genéricos continuam vindo das classes atuais: `UNAUTHORIZED`, `FORBIDDEN`
 (`requireRole`), `VALIDATION_ERROR` (Zod, via `validate`).
@@ -497,7 +622,7 @@ Erros genéricos continuam vindo das classes atuais: `UNAUTHORIZED`, `FORBIDDEN`
 | `WEBHOOK_DELIVERY_HTTP_ERROR` | resposta com status ≥ 300 (inclui o status: `HTTP 503`) |
 | `WEBHOOK_DELIVERY_TIMEOUT` | sem resposta em `WEBHOOK_HTTP_TIMEOUT_MS` ([09:42]) |
 | `WEBHOOK_DELIVERY_NETWORK_ERROR` | DNS / conexão recusada / TLS |
-| `WEBHOOK_PAYLOAD_TOO_LARGE` | corpo > `WEBHOOK_MAX_PAYLOAD_BYTES` — barrado já na inserção (§5.1d), [09:24] |
+| `WEBHOOK_PAYLOAD_TOO_LARGE` | `body` > `WEBHOOK_MAX_PAYLOAD_BYTES` (64 KB), verificado antes do envio (§5.3) — vai direto para a DLQ ([09:23]‑[09:24]) |
 | `WEBHOOK_MAX_ATTEMPTS_EXCEEDED` | motivo final ao mover para a DLQ ([09:17]) |
 
 ---
@@ -510,7 +635,7 @@ Origem: [09:15]‑[09:19], [09:42] — [ADR-003](adrs/ADR-003-retry-com-backoff-
 | --- | --- |
 | **Timeout HTTP** | `WEBHOOK_HTTP_TIMEOUT_MS = 10000` via `AbortController` ([09:42] Diego). |
 | **Retry** | até `WEBHOOK_MAX_ATTEMPTS = 5` ([09:16] Diego rejeitou 3). |
-| **Backoff** | fixo `1m/5m/30m/2h/12h` a partir de `nextAttemptAt` ([09:17] Diego). Sem *jitter* (single-worker). |
+| **Backoff** | progressão fixa `1m/5m/30m/2h/12h` via `nextAttemptAt` ([09:17] Diego). |
 | **DLQ** | tabela dedicada `webhook_dead_letter` ([09:18] Diego), com replay manual (§5.5). |
 | **Fallback** | **não há** fallback automático de canal (e-mail fora de escopo — [09:37]). O "fallback" operacional é o replay administrativo. |
 | **Transação atômica** | evento só existe se `changeStatus` comitou ([09:41]). |
@@ -558,10 +683,13 @@ ou atrasado (o SLA é 10 s, [09:02]).
 
 ### 9.3 Tracing / correlação
 
-Não há APM no projeto. Propagar correlação reusando o header **`X-Request-Id`** já emitido
-por [src/middlewares/request-logger.middleware.ts](../src/middlewares/request-logger.middleware.ts)
-(linhas 6‑8): gravar `request_id` na linha da `webhook_outbox` quando o evento nasce de um
-`PATCH /orders/:id/status`, e relogá-lo em todos os eventos do worker daquele `event_id`.
+Não há APM nem biblioteca de tracing no projeto, e nenhuma é adicionada. A correlação
+ponta a ponta usa o **`event_id`** (= `X-Event-Id`), presente em todos os logs de API e do
+worker para um mesmo evento. Para amarrar o evento ao request HTTP que originou a
+transição, a `webhook_outbox` tem a coluna opcional `requestId` (§4), alimentada com o
+`X-Request-Id` que
+[request-logger.middleware.ts](../src/middlewares/request-logger.middleware.ts) (linhas
+6‑8) já gera por request.
 
 ---
 
@@ -627,8 +755,8 @@ por [src/middlewares/request-logger.middleware.ts](../src/middlewares/request-lo
     `webhook_outbox.id` ([09:25]).
 
 **Contratos / erros** — [ADR-007](adrs/ADR-007-formato-de-payload-headers-e-limites.md), §7
-15. Payload contém exatamente os campos do §6.4 (sem `items`) ([09:43]).
-16. Headers do §6.3 presentes em todo request de entrega ([09:44]‑[09:45]).
+15. Payload contém exatamente os campos do §6.10 (sem `items`) ([09:43]).
+16. Headers do §6.9 presentes em todo request de entrega ([09:44]‑[09:45]).
 17. `GET /webhooks/:id/deliveries` pagina e retorna sucesso/falha, status, `durationMs`,
     trecho da resposta ([09:34]).
 18. Todo erro do módulo responde `{ error: { code: "WEBHOOK_...", message } }` via o
@@ -651,7 +779,7 @@ de webhooks se conecta a cada um.
 
 - Em `changeStatus` (linhas 126‑179), dentro do `this.prisma.$transaction`, após o
   `tx.orderStatusHistory.create` (linha 159) e o `refreshed` (linha 169), inserir:
-  `await this.publishWebhookEvent(tx, { order: refreshed!, fromStatus: from, toStatus: to })`.
+  `await publishWebhookEvent(tx, { order: refreshed!, fromStatus: from, toStatus: to })` (função livre, não método).
 - `publishWebhookEvent` é uma **função** importada de
   `src/modules/webhooks/webhook.publisher.ts`, recebendo o `Prisma.TransactionClient`
   (`tx`) já usado no arquivo (alias `TxClient`, linha 24). **Não** injetar
@@ -737,14 +865,14 @@ de webhooks se conecta a cada um.
 
 | Risco | Origem | Impacto | Mitigação |
 | --- | --- | --- | --- |
-| `publishWebhookEvent` lento/pesado dentro da transação de `changeStatus` degrada a escrita de pedidos | [09:04] Bruno | Latência em todo o fluxo de pedidos | Só `SELECT` de endpoints + `INSERT`s simples; nenhum I/O externo; índice `webhook_endpoints(customerId, active)`; medir p95 de `changeStatus` antes/depois (crit. 2 do §11) |
+| `publishWebhookEvent` lento/pesado dentro da transação de `changeStatus` degrada a escrita de pedidos | [09:04] Bruno | Latência em todo o fluxo de pedidos | Só `SELECT` de endpoints + `INSERT`s simples; nenhum I/O externo; índice `webhook_endpoints(customerId, active)`; medir p95 de `changeStatus` antes/depois |
 | Worker parado silenciosamente (crash, deadlock) | [09:11] Diego | Eventos param de sair, cliente volta a ficar "pendurado" | Alerta em `webhook_outbox_pending` (idade > 30 s); `webhook.worker_tick` em nível debug; recuperação de linhas `PROCESSING` órfãs (§8) |
 | Crescimento indefinido de `webhook_outbox` / `webhook_delivery_attempts` | [09:08] Diego (retention fora de escopo) | Tabelas grandes, *scan* lento | Índice `(status, nextAttemptAt)`; abrir tarefa de *retention* (30 dias) como follow-up explícito |
 | *Secret* vaza em log ou em resposta de listagem | [09:22] Diego (caso real) | Cliente pode ser falsificado | `redact` no Pino (§12.8); `secret` só em `POST`/`rotate-secret`; revisão de segurança da Sofia antes do deploy ([09:46]) |
 | Single-worker vira gargalo de throughput | [09:12]‑[09:13] Diego | Latência acima de 10 s sob pico | `FOR UPDATE SKIP LOCKED` já preparado; abrir follow-up de particionamento por `order_id` |
 | Cliente não implementa dedup por `X-Event-Id` | [09:25] Sofia | Pedido processado em duplicidade no cliente | Documentação destacada no portal do dev ([09:26] Marcos); `X-Event-Id` estável e explícito |
 | Retry por até ~15 h mantém eventos "vivos" e pode entregar informação obsoleta | [09:17] | Cliente recebe transição antiga muito depois | Payload é snapshot com `timestamp` do evento; cliente compara com o estado atual via `GET /orders/:id` ([09:43]) |
-| 4xx do cliente tratado como retry gera tentativas inúteis | §6.5 | Ruído e carga | Aceito nesta fase (simplicidade); `410 Gone` como "parar de tentar" fica como melhoria futura |
+| Resposta não-2xx do cliente (inclusive erro permanente) é sempre retentada até a 5ª tentativa | §6.11 | Tentativas desperdiçadas | Aceito nesta fase; as 5 tentativas limitam o desperdício; refinamento por código de status é melhoria futura |
 | Janela de revisão de segurança no fim das 3 sprints atrasa o deploy | [09:46]‑[09:47] | Risco de prazo (fim de novembro) | Reservar 2 dias úteis para a Sofia; entregar HMAC + geração de secret já na 1ª sprint para revisão antecipada |
 
 ---
@@ -759,6 +887,6 @@ de webhooks se conecta a cada um.
    rollback.
 5. **`src/worker.ts` + `WebhookProcessor`** (§5.2‑5.4, §12.5): polling, entrega, retry,
    DLQ.
-6. **Endpoints `deliveries` e `admin/replay`** (§5.5, §6.2).
+6. **Endpoints `deliveries` e `admin/replay`** (§5.5, §6.7, §6.8).
 7. **Observabilidade** (§9) e **testes de integração ponta a ponta** (§12.9).
 8. **Revisão de segurança da Sofia** e ajustes ([09:46]).
